@@ -177,7 +177,7 @@ public class Dispatcher {
 							ad.appendParam("data", value.toString());
 
 							// 发送数据
-							cellet.talk(tag, dialect);
+							cellet.talk(tag, ad);
 						}
 					} catch (JSONException e) {
 						e.printStackTrace();
