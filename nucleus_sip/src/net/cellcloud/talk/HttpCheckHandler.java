@@ -52,6 +52,7 @@ public final class HttpCheckHandler extends AbstractJSONHandler implements Capsu
 
 	protected static final String Plaintext = "plaintext";
 	protected static final String Tag = "tag";
+	protected static final String Error = "error";
 
 	private TalkService talkService;
 
@@ -77,14 +78,17 @@ public final class HttpCheckHandler extends AbstractJSONHandler implements Capsu
 		if (null != session) {
 			TalkService.Certificate cert = this.talkService.getCertificate(session);
 			if (null != cert) {
+				// {"plaintext": plaintext, "tag": tag}
 				String data = new String(request.readRequestData(), Charset.forName("UTF-8"));
 				try {
 					JSONObject json = new JSONObject(data);
 					// 获得明文码
 					String plaintext = json.getString(Plaintext);
+					// 获得 Tag
+					String tag = json.getString(Tag);
 					if (null != plaintext && plaintext.equals(cert.plaintext)) {
 						// 检测通过
-						this.talkService.acceptSession(session);
+						this.talkService.acceptSession(session, tag);
 						// 返回数据
 						JSONObject ret = new JSONObject();
 						ret.put(Tag, Nucleus.getInstance().getTagAsString());

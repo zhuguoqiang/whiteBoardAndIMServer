@@ -30,12 +30,14 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 
 import net.cellcloud.common.LogLevel;
 import net.cellcloud.common.Logger;
 import net.cellcloud.core.Nucleus;
+import net.cellcloud.util.Utils;
 
 /** Cell Cloud 容器。
  * 
@@ -65,8 +67,12 @@ public final class Cell {
 			return false;
 		}
 
+		Arguments arguments = new Arguments();
+		arguments.console = console;
+		arguments.logFile = logFile;
+
 		// 实例化 App
-		Cell.app = new Application(console, logFile);
+		Cell.app = new Application(arguments);
 
 		Cell.daemon = new Thread() {
 			@Override
@@ -182,6 +188,8 @@ public final class Cell {
 
 			FileOutputStream fos = new FileOutputStream(file);
 			fos.write(Nucleus.getInstance().getTagAsString().getBytes());
+			fos.write('\n');
+			fos.write(Utils.string2Bytes(Utils.convertDateToSimpleString(new Date())));
 			fos.flush();
 			fos.close();
 		} catch (IOException e) {
@@ -208,7 +216,7 @@ public final class Cell {
 				// 解析参数
 				Arguments arguments = Cell.parseArgs(args);
 
-				Cell.app = new Application(arguments.console, arguments.logFile);
+				Cell.app = new Application(arguments);
 
 				if (Cell.app.startup()) {
 
@@ -229,7 +237,8 @@ public final class Cell {
 			}
 			else if (args[0].equals("stop")) {
 				File file = new File("bin/tag");
-				if (file.exists()) {
+				if (file.exists() && file.length() <= 36) {
+					// 删除文件
 					file.delete();
 
 					System.out.println("\nStopping Cell Cloud process, please waiting...");
@@ -258,6 +267,9 @@ public final class Cell {
 					System.out.println("\nCell Cloud process exit, progress elapsed time " +
 							(int)((System.currentTimeMillis() - startTime)/1000) + " seconds.\n");
 				}
+				else {
+					System.out.println("Can not find Cell Cloud process.");
+				}
 			}
 			else {
 				VersionInfo.main(args);
@@ -279,6 +291,7 @@ public final class Cell {
 
 		// -console=<true|false>
 		// -log=<filename>
+		// -config=<filename|none>
 
 		if (args.length > 1) {
 			HashMap<String, String> map = new HashMap<String, String>(2);
@@ -289,11 +302,11 @@ public final class Cell {
 				}
 			}
 
-			// 判断是否使用交互式控制台
 			for (Map.Entry<String, String> entry : map.entrySet()) {
 				String name = entry.getKey();
 				String value = entry.getValue();
 				if (name.equals("-console")) {
+					// 交互式控制台
 					try {
 						ret.console = Boolean.parseBoolean(value);
 					} catch (Exception e) {
@@ -301,7 +314,15 @@ public final class Cell {
 					}
 				}
 				else if (name.equals("-log")) {
+					// 日志文件
 					ret.logFile = value;
+				}
+				else if (name.equals("-config")) {
+					// 配置文件
+					if (value.equals("none") || value.equals("null"))
+						ret.confileFile = null;
+					else
+						ret.confileFile = value;
 				}
 			}
 		}

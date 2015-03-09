@@ -52,6 +52,7 @@ public final class HttpRequestHandler extends AbstractJSONHandler implements Cap
 	protected static final String Identifier = "identifier";
 	protected static final String Tag = "tag";
 	protected static final String Version = "version";
+	protected static final String Error = "error";
 
 	private TalkService talkService;
 
@@ -81,6 +82,7 @@ public final class HttpRequestHandler extends AbstractJSONHandler implements Cap
 		throws IOException {
 		HttpSession session = request.getSession();
 		if (null != session) {
+			// {"tag": tag, "identifier": identifier}
 			String data = new String(request.readRequestData(), Charset.forName("UTF-8"));
 			try {
 				JSONObject json = new JSONObject(data);
@@ -88,17 +90,21 @@ public final class HttpRequestHandler extends AbstractJSONHandler implements Cap
 				String identifier = json.getString(Identifier);
 				// 请求 Cellet
 				TalkTracker tracker = this.talkService.processRequest(session, tag, identifier);
-				if (null != tracker && null != tracker.activeCellet) {
+				if (null != tracker) {
 					// 成功
 					JSONObject ret = new JSONObject();
 					ret.put(Tag, tag);
 					ret.put(Identifier, identifier);
-					ret.put(Version, tracker.activeCellet.getFeature().getVersion().toString());
+					ret.put(Version, tracker.getCellet(identifier).getFeature().getVersion().toString());
 					this.respondWithOk(response, ret);
 				}
 				else {
 					// 失败
-					this.respond(response, HttpResponse.SC_NOT_FOUND);
+					JSONObject ret = new JSONObject();
+					ret.put(Tag, tag);
+					ret.put(Identifier, identifier);
+					ret.put(Error, 0);
+					this.respondWithOk(response, ret);
 				}
 			} catch (JSONException e) {
 				Logger.log(HttpRequestHandler.class, e, LogLevel.WARNING);

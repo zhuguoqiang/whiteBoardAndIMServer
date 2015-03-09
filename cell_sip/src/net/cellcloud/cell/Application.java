@@ -33,6 +33,9 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
@@ -43,12 +46,14 @@ import javax.xml.parsers.ParserConfigurationException;
 import net.cellcloud.Version;
 import net.cellcloud.cell.log.FileLogger;
 import net.cellcloud.common.LogLevel;
+import net.cellcloud.common.LogManager;
 import net.cellcloud.common.Logger;
 import net.cellcloud.core.Nucleus;
 import net.cellcloud.core.NucleusConfig;
 import net.cellcloud.exception.SingletonException;
 
 import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import org.xml.sax.SAXException;
@@ -59,15 +64,22 @@ import org.xml.sax.SAXException;
  */
 public final class Application {
 
-	private Nucleus nucleus;
-
 	private boolean spinning;
 	private byte[] monitor;
 
 	private Console console;
 
-	public Application(boolean consoleMode, String logFile) {
+	private String configFile;
+
+	public Application(Arguments args) {
 		StringBuilder buf = new StringBuilder();
+		buf.append("Cell Application Server version: ");
+		buf.append(VersionInfo.MAJOR);
+		buf.append(".");
+		buf.append(VersionInfo.MINOR);
+		buf.append(".");
+		buf.append(VersionInfo.REVISION);
+		buf.append("\n");
 		buf.append("Cell Cloud ");
 		buf.append(Version.MAJOR);
 		buf.append(".");
@@ -78,6 +90,7 @@ public final class Application {
 		buf.append(Version.NAME);
 		buf.append(")\n");
 
+		buf.append("-----------------------------------------------------------------------\n");
 		buf.append(" ___ ___ __  __     ___ __  ___ _ _ ___\n");
 		buf.append("| __| __| | | |    | __| | |   | | | _ \\\n");
 		buf.append("| |_| _|| |_| |_   | |_| |_| | | | | | |\n");
@@ -91,38 +104,65 @@ public final class Application {
 
 		this.monitor = new byte[0];
 
-		if (consoleMode)
+		if (args.console) {
 			this.console = new Console(this);
-		else
+		}
+		else {
 			this.console = null;
+			LogManager.getInstance().addHandle(LogManager.getInstance().createSystemOutHandle());
+		}
 
 		// 使用文件日志
-		if (null != logFile)
-			FileLogger.getInstance().open("logs" + File.separator + logFile);
+		if (null != args.logFile) {
+			FileLogger.getInstance().open("logs" + File.separator + args.logFile);
+		}
+
+		// 配置文件
+		this.configFile = args.confileFile;
 	}
 
 	/** 启动程序。
 	 */
 	protected boolean startup() {
-		try {
-			if (null == (this.nucleus = Nucleus.getInstance())) {
-				NucleusConfig config = new NucleusConfig();
-				config.role = NucleusConfig.Role.NODE;
-				config.device = NucleusConfig.Device.SERVER;
-
-				this.nucleus = Nucleus.createInstance(config);
-			}
-		} catch (SingletonException e) {
-			Logger.log(Application.class, e, LogLevel.ERROR);
-			return false;
-		}
+		NucleusConfig config = new NucleusConfig();
+		config.role = NucleusConfig.Role.NODE;
+		config.device = NucleusConfig.Device.SERVER;
 
 		// 加载内核配置
-		if (!loadConfig(this.nucleus)) {
-			return false;
+		HashMap<String, ArrayList<String>> cellets = null;
+		if (null != this.configFile) {
+			cellets = this.loadConfig(config, this.configFile);
+			if (null == cellets || cellets.isEmpty()) {
+				Logger.e(Application.class, "Can not find cellet in config file, start failed!");
+				return false;
+			}
 		}
 
-		if (!this.nucleus.startup()) {
+		Nucleus nucleus = Nucleus.getInstance();
+		if (null == nucleus) {
+			try {
+				nucleus = Nucleus.createInstance(config);
+			} catch (SingletonException e) {
+				Logger.log(Application.class, e, LogLevel.ERROR);
+				return false;
+			}
+		}
+
+		// 为内核准备 Cellet 信息
+		if (null != cellets) {
+			Iterator<Map.Entry<String, ArrayList<String>>> iter = cellets.entrySet().iterator();
+			while (iter.hasNext()) {
+				Map.Entry<String, ArrayList<String>> e = iter.next();
+				nucleus.prepareCelletJar(e.getKey(), e.getValue());
+			}
+
+			cellets.clear();
+			cellets = null;
+		}
+
+		// 启动内核
+		if (!nucleus.startup()) {
+			Logger.e(Application.class, "Nucleus start failed!");
 			return false;
 		}
 
@@ -134,8 +174,8 @@ public final class Application {
 	/** 关闭程序。
 	 */
 	protected void shutdown() {
-		if (null != this.nucleus) {
-			this.nucleus.shutdown();
+		if (null != Nucleus.getInstance()) {
+			Nucleus.getInstance().shutdown();
 		}
 
 		FileLogger.getInstance().close();
@@ -191,12 +231,14 @@ public final class Application {
 
 	/** 加载配置。
 	 */
-	private boolean loadConfig(Nucleus nucleus) {
+	private HashMap<String, ArrayList<String>> loadConfig(NucleusConfig config, String configFile) {
+		HashMap<String, ArrayList<String>> celletMap = new HashMap<String, ArrayList<String>>();
+
 		try {
 			// 检测配置文件
 			URL pathURL = this.getClass().getClassLoader().getResource(".");
 			String resourcePath = (null != pathURL) ? pathURL.getPath() : "./";
-			String fileName = resourcePath + "cell.xml";
+			String fileName = resourcePath + configFile;
 			File file = new File(fileName);
 			if (!file.exists()) {
 				String[] array = resourcePath.split("/");
@@ -213,7 +255,7 @@ public final class Application {
 				path = null;
 			}
 
-			fileName = resourcePath + "cell.xml";
+			fileName = resourcePath + configFile;
 			file = new File(fileName);
 			if (file.exists()) {
 				// 解析文件
@@ -221,9 +263,39 @@ public final class Application {
 				DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
 				DocumentBuilder db = dbf.newDocumentBuilder();
 				Document document = db.parse(fileName);
+				
+				// 读取 nucleus
+				NodeList list = document.getElementsByTagName("nucleus");
+				if (list.getLength() > 0) {
+					Element el = (Element) list.item(0);
+					NodeList talks = el.getElementsByTagName("talk");
+					if (talks.getLength() > 0) {
+						Element elTalk = (Element) talks.item(0);
+						// port
+						NodeList nl = elTalk.getElementsByTagName("port");
+						if (nl.getLength() > 0) {
+							config.talk.port = Integer.parseInt(nl.item(0).getTextContent());
+						}
+						// block
+						nl = elTalk.getElementsByTagName("block");
+						if (nl.getLength() > 0) {
+							config.talk.block = Integer.parseInt(nl.item(0).getTextContent());
+						}
+						// connections
+						nl = elTalk.getElementsByTagName("connections");
+						if (nl.getLength() > 0) {
+							config.talk.maxConnections = Integer.parseInt(nl.item(0).getTextContent());
+						}
+						// httpd
+						nl = elTalk.getElementsByTagName("httpd");
+						if (nl.getLength() > 0) {
+							config.talk.httpd = Boolean.parseBoolean(nl.item(0).getTextContent());
+						}
+					}
+				}
 
-				// 读取 Cellet
-				NodeList list = document.getElementsByTagName("cellet");
+				// 读取 cellet
+				list = document.getElementsByTagName("cellet");
 				for (int i = 0; i < list.getLength(); ++i) {
 					Node node = list.item(i);
 					String jar = node.getAttributes().getNamedItem("jar").getNodeValue();
@@ -236,11 +308,9 @@ public final class Application {
 					}
 
 					// 添加 Jar
-					nucleus.prepareCelletJar(jar, classes);
+					celletMap.put(jar, classes);
 				}
 			}
-
-			return true;
 		} catch (ParserConfigurationException e) {
 			Logger.log(Application.class, e, LogLevel.ERROR);
 		} catch (SAXException e) {
@@ -249,16 +319,16 @@ public final class Application {
 			Logger.log(Application.class, e, LogLevel.ERROR);
 		}
 
-		return false;
+		return celletMap;
 	}
 
 	/** 加载所有库文件
 	 */
 	protected boolean loadLibraries() {
-		String parentPath = "lib/";
+		String parentPath = "libs/";
 		File file = new File(parentPath);
 		if (!file.exists()) {
-			parentPath = "../lib/";
+			parentPath = "../libs/";
 			file = new File(parentPath);
 		}
 
@@ -266,7 +336,7 @@ public final class Application {
 			return false;
 		}
 
-		// 枚举 lib 目录下的所有 jar 文件，并进行装载
+		// 枚举 libs 目录下的所有 jar 文件，并进行装载
 
 		ArrayList<URL> urls = new ArrayList<URL>();
 		ArrayList<String> classNameList = new ArrayList<String>();
