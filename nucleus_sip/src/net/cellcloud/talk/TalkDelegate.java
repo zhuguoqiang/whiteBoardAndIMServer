@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------
 This source file is part of Cell Cloud.
 
-Copyright (c) 2009-2013 Cell Cloud Team (www.cellcloud.net)
+Copyright (c) 2009-2015 Cell Cloud Team (www.cellcloud.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,26 +24,17 @@ THE SOFTWARE.
 -----------------------------------------------------------------------------
 */
 
-package net.cellcloud;
+package net.cellcloud.talk;
 
-/** 程序版本描述。
- * 
- * @author Jiangwei Xu
- */
-public final class Version {
+import net.cellcloud.talk.dialect.Dialect;
 
-	/// 主版本号
-	public static final int MAJOR = 1;
+public interface TalkDelegate {
 
-	/// 副版本号
-	public static final int MINOR = 2;
+	public boolean doTalk(String identifier, Dialect dialect);
 
-	/// 修订号
-	public static final int REVISION = 9;
+	public void didTalk(String identifier, Dialect dialect);
 
-	/// 版本名
-	public static final String NAME = "Journey";
+	public boolean doDialogue(String identifier, Dialect dialect);
 
-	/// 是否调试模式
-	public static boolean DEBUG = true;
+	public void didDialogue(String identifier, Dialect dialect);
 }

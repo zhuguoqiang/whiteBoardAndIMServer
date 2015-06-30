@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------
 This source file is part of Cell Cloud.
 
-Copyright (c) 2009-2014 Cell Cloud Team (www.cellcloud.net)
+Copyright (c) 2009-2015 Cell Cloud Team (www.cellcloud.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,7 @@ THE SOFTWARE.
 package net.cellcloud.http;
 
 import java.net.InetSocketAddress;
-import java.util.Vector;
+import java.util.LinkedList;
 
 import net.cellcloud.common.Logger;
 import net.cellcloud.common.Message;
@@ -49,13 +49,13 @@ import org.eclipse.jetty.websocket.api.annotations.WebSocket;
 public final class JettyWebSocket implements WebSocketManager {
 
 	private MessageHandler handler;
-	private Vector<Session> sessions;
-	private Vector<WebSocketSession> wsSessions;
+	private LinkedList<Session> sessions;
+	private LinkedList<WebSocketSession> wsSessions;
 
 	public JettyWebSocket(MessageHandler handler) {
 		this.handler = handler;
-		this.sessions = new Vector<Session>();
-		this.wsSessions = new Vector<WebSocketSession>();
+		this.sessions = new LinkedList<Session>();
+		this.wsSessions = new LinkedList<WebSocketSession>();
 	}
 
 	@OnWebSocketMessage
@@ -89,8 +89,11 @@ public final class JettyWebSocket implements WebSocketManager {
 			return;
 		}
 
-		int index = this.sessions.indexOf(session);
-		WebSocketSession wsSession = this.wsSessions.get(index);
+		WebSocketSession wsSession = null;
+		synchronized (this.sessions) {
+			int index = this.sessions.indexOf(session);
+			wsSession = this.wsSessions.get(index);
+		}
 
 		if (null != this.handler) {
 			Message message = new Message(text);
@@ -114,8 +117,15 @@ public final class JettyWebSocket implements WebSocketManager {
 	public void onWebSocketConnect(Session session) {
 		Logger.d(this.getClass(), "onWebSocketConnect");
 
-		if (this.sessions.contains(session)) {
-			return;
+		// 设置闲置超时时间
+		session.setIdleTimeout(60 * 60 * 1000);
+
+		synchronized (this.sessions) {
+			int index = this.sessions.indexOf(session);
+			if (index >= 0) {
+				this.sessions.remove(index);
+				this.wsSessions.remove(index);
+			}
 		}
 
 		InetSocketAddress address = new InetSocketAddress(session.getRemoteAddress().getAddress().getHostAddress()
@@ -138,21 +148,30 @@ public final class JettyWebSocket implements WebSocketManager {
 	public void onWebSocketClose(Session session, int code, String reason) {
 		Logger.d(this.getClass(), "onWebSocketClose");
 
+		// 如果 session 是 open 状态，则不删除
+		if (session.isOpen()) {
+			Logger.d(this.getClass(), "onWebSocketClose # Session is open");
+			return;
+		}
+
 		WebSocketSession wsSession = null;
 
-		int index = this.sessions.indexOf(session);
-		if (index >= 0) {
+		int index = -1;
+		synchronized (this.sessions) {
+			index = this.sessions.indexOf(session);
+			if (index < 0) {
+				return;
+			}
+
 			wsSession = this.wsSessions.get(index);
+
+			this.sessions.remove(index);
+			this.wsSessions.remove(index);
 		}
 
 		if (null != this.handler) {
 			this.handler.sessionClosed(wsSession);
 			this.handler.sessionDestroyed(wsSession);
-		}
-
-		synchronized (this.sessions) {
-			this.sessions.remove(index);
-			this.wsSessions.remove(index);
 		}
 	}
 
@@ -162,9 +181,11 @@ public final class JettyWebSocket implements WebSocketManager {
 
 		WebSocketSession wsSession = null;
 
-		int index = this.sessions.indexOf(session);
-		if (index >= 0) {
-			wsSession = this.wsSessions.get(index);
+		synchronized (this.sessions) {
+			int index = this.sessions.indexOf(session);
+			if (index >= 0) {
+				wsSession = this.wsSessions.get(index);
+			}
 		}
 
 		if (null != this.handler) {
@@ -179,10 +200,42 @@ public final class JettyWebSocket implements WebSocketManager {
 
 	@Override
 	public void close(WebSocketSession session) {
-		int index = this.wsSessions.indexOf(session);
-		if (index >= 0) {
-			Session rawSession = this.sessions.get(index);
+		Session rawSession = null;
+
+		synchronized (this.sessions) {
+			int index = this.wsSessions.indexOf(session);
+			if (index >= 0) {
+				rawSession = this.sessions.get(index);
+			}
+		}
+
+		if (null != rawSession) {
 			rawSession.close(1000, "Server close this session");
 		}
 	}
+
+	/*private void checkSessionTimeout() {
+		ArrayList<Session> closedList = new ArrayList<Session>();
+
+		synchronized (this.sessions) {
+			long time = Clock.currentTimeMillis();
+
+			for (int i = 0; i < this.sessions.size(); ++i) {
+				Session rawSession = this.sessions.get(i);
+				WebSocketSession wsSession = this.wsSessions.get(i);
+
+				if (time - wsSession.getHeartbeat() >= this.timeout) {
+					closedList.add(rawSession);
+				}
+			}
+		}
+
+		if (!closedList.isEmpty()) {
+			for (Session s : closedList) {
+				s.close(1000, "Server close this session");
+			}
+			closedList.clear();
+		}
+		closedList = null;
+	}*/
 }

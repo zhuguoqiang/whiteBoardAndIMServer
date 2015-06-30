@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------
 This source file is part of Cell Cloud.
 
-Copyright (c) 2009-2013 Cell Cloud Team (www.cellcloud.net)
+Copyright (c) 2009-2015 Cell Cloud Team (www.cellcloud.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -24,26 +24,61 @@ THE SOFTWARE.
 -----------------------------------------------------------------------------
 */
 
-package net.cellcloud;
+package net.cellcloud.util;
 
-/** 程序版本描述。
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
  * 
  * @author Jiangwei Xu
+ *
  */
-public final class Version {
+public final class Clock {
 
-	/// 主版本号
-	public static final int MAJOR = 1;
+	private static final Clock instance = new Clock();
 
-	/// 副版本号
-	public static final int MINOR = 2;
+	private Timer timer;
 
-	/// 修订号
-	public static final int REVISION = 9;
+	private AtomicLong time;
 
-	/// 版本名
-	public static final String NAME = "Journey";
+	private Clock() {
+		this.time = new AtomicLong(System.currentTimeMillis());
+	}
 
-	/// 是否调试模式
-	public static boolean DEBUG = true;
+	private void startTimer() {
+		this.timer = new Timer();
+		this.timer.scheduleAtFixedRate(new ClockTask(), 1000, 500);
+	}
+
+	private void stopTimer() {
+		if (null != this.timer) {
+			this.timer.purge();
+			this.timer.cancel();
+			this.timer = null;
+		}
+	}
+
+	public static void start() {
+		Clock.instance.startTimer();
+	}
+
+	public static void stop() {
+		Clock.instance.stopTimer();
+	}
+
+	public static long currentTimeMillis() {
+		return Clock.instance.time.get();
+	}
+
+	private class ClockTask extends TimerTask {
+		private ClockTask() {
+		}
+
+		@Override
+		public void run() {
+			time.set(System.currentTimeMillis());
+		}
+	}
 }

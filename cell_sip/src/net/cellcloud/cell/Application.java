@@ -96,11 +96,10 @@ public final class Application {
 		buf.append("| |_| _|| |_| |_   | |_| |_| | | | | | |\n");
 		buf.append("|___|___|___|___|  |___|___|___|___|___/\n\n");
 
-		buf.append("Copyright (c) 2009,2014 Cell Cloud Team, www.cellcloud.net\n");
+		buf.append("Copyright (c) 2009,2015 Cell Cloud Team, www.cellcloud.net\n");
 		buf.append("-----------------------------------------------------------------------");
 
-		System.out.println(buf);
-		buf = null;
+		System.out.println(buf.toString());
 
 		this.monitor = new byte[0];
 
@@ -109,7 +108,7 @@ public final class Application {
 		}
 		else {
 			this.console = null;
-			LogManager.getInstance().addHandle(LogManager.getInstance().createSystemOutHandle());
+			LogManager.getInstance().addHandle(LogManager.createSystemOutHandle());
 		}
 
 		// 使用文件日志
@@ -117,8 +116,13 @@ public final class Application {
 			FileLogger.getInstance().open("logs" + File.separator + args.logFile);
 		}
 
+		// 记录版本日志
+		Logger.i(Application.class, buf.toString());
+
 		// 配置文件
 		this.configFile = args.confileFile;
+
+		buf = null;
 	}
 
 	/** 启动程序。
@@ -263,11 +267,16 @@ public final class Application {
 				DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
 				DocumentBuilder db = dbf.newDocumentBuilder();
 				Document document = db.parse(fileName);
-				
+
 				// 读取 nucleus
 				NodeList list = document.getElementsByTagName("nucleus");
 				if (list.getLength() > 0) {
 					Element el = (Element) list.item(0);
+					// httpd
+					config.httpd = Boolean.parseBoolean(el.getElementsByTagName("httpd").item(0).getTextContent());
+					Logger.i(this.getClass(), "nucleus.httpd = " + config.httpd);
+
+					// talk config
 					NodeList talks = el.getElementsByTagName("talk");
 					if (talks.getLength() > 0) {
 						Element elTalk = (Element) talks.item(0);
@@ -275,21 +284,43 @@ public final class Application {
 						NodeList nl = elTalk.getElementsByTagName("port");
 						if (nl.getLength() > 0) {
 							config.talk.port = Integer.parseInt(nl.item(0).getTextContent());
+							Logger.i(this.getClass(), "nucleus.talk.port = " + config.talk.port);
 						}
 						// block
 						nl = elTalk.getElementsByTagName("block");
 						if (nl.getLength() > 0) {
 							config.talk.block = Integer.parseInt(nl.item(0).getTextContent());
+							Logger.i(this.getClass(), "nucleus.talk.block = " + config.talk.block);
 						}
 						// connections
 						nl = elTalk.getElementsByTagName("connections");
 						if (nl.getLength() > 0) {
 							config.talk.maxConnections = Integer.parseInt(nl.item(0).getTextContent());
+							Logger.i(this.getClass(), "nucleus.talk.connections = " + config.talk.maxConnections);
 						}
-						// httpd
-						nl = elTalk.getElementsByTagName("httpd");
+						// http
+						nl = elTalk.getElementsByTagName("http");
 						if (nl.getLength() > 0) {
-							config.talk.httpd = Boolean.parseBoolean(nl.item(0).getTextContent());
+							Element elHttp = (Element) nl.item(0);
+
+							// http enabled
+							nl = elHttp.getElementsByTagName("enabled");
+							if (nl.getLength() > 0) {
+								config.talk.httpEnabled = Boolean.parseBoolean(nl.item(0).getTextContent());
+								Logger.i(this.getClass(), "nucleus.talk.http.enabled = " + config.talk.httpEnabled);
+							}
+							// http port
+							nl = elHttp.getElementsByTagName("port");
+							if (nl.getLength() > 0) {
+								config.talk.httpPort = Integer.parseInt(nl.item(0).getTextContent());
+								Logger.i(this.getClass(), "nucleus.talk.http.port = " + config.talk.httpPort);
+							}
+							// http queue size
+							nl = elHttp.getElementsByTagName("queue");
+							if (nl.getLength() > 0) {
+								config.talk.httpQueueSize = Integer.parseInt(nl.item(0).getTextContent());
+								Logger.i(this.getClass(), "nucleus.talk.http.queue = " + config.talk.httpQueueSize);
+							}
 						}
 					}
 				}

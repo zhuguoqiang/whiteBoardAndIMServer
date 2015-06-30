@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------
 This source file is part of Cell Cloud.
 
-Copyright (c) 2009-2014 Cell Cloud Team (www.cellcloud.net)
+Copyright (c) 2009-2015 Cell Cloud Team (www.cellcloud.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -46,31 +46,33 @@ public class WebSocketSession extends Session {
 
 	private org.eclipse.jetty.websocket.api.Session rawSession;
 
-	private long heartbeat;
-
 	public WebSocketSession(InetSocketAddress address, org.eclipse.jetty.websocket.api.Session session) {
 		super(null, address);
 		this.rawSession = session;
 	}
 
-	public long getHeartbeat() {
-		return this.heartbeat;
-	}
-
-	public void heartbeat() {
-		this.heartbeat = System.currentTimeMillis();
+	public boolean isOpen() {
+		return this.rawSession.isOpen();
 	}
 
 	@Override
 	public void write(Message message) {
-		RemoteEndpoint remote = this.rawSession.getRemote();
-		remote.sendString(message.getAsString(), null);
-		if (remote.getBatchMode() == BatchMode.ON) {
-			try {
-				remote.flush();
-			} catch (IOException e) {
-				Logger.log(this.getClass(), e, LogLevel.ERROR);
+		if (!this.rawSession.isOpen()) {
+			return;
+		}
+
+		try {
+			RemoteEndpoint remote = this.rawSession.getRemote();
+			remote.sendString(message.getAsString(), null);
+			if (remote.getBatchMode() == BatchMode.ON) {
+				try {
+					remote.flush();
+				} catch (IOException e) {
+					Logger.log(this.getClass(), e, LogLevel.ERROR);
+				}
 			}
+		} catch (Exception e) {
+			Logger.log(this.getClass(), e, LogLevel.ERROR);
 		}
 	}
 }

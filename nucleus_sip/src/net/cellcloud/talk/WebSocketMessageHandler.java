@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------
 This source file is part of Cell Cloud.
 
-Copyright (c) 2009-2013 Cell Cloud Team (www.cellcloud.net)
+Copyright (c) 2009-2015 Cell Cloud Team (www.cellcloud.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -34,7 +34,6 @@ import net.cellcloud.common.Message;
 import net.cellcloud.common.MessageHandler;
 import net.cellcloud.common.Session;
 import net.cellcloud.core.Nucleus;
-import net.cellcloud.http.WebSocketSession;
 import net.cellcloud.talk.stuff.PrimitiveSerializer;
 
 import org.json.JSONException;
@@ -94,8 +93,8 @@ public class WebSocketMessageHandler implements MessageHandler {
 					this.processDialogue(data.getJSONObject(TALK_PACKET), session);
 				}
 				else if (packetTag.equals(TPT_HEARTBEAT)) {
-					// TODO 收集客户端时间
-					((WebSocketSession)session).heartbeat();
+					// 更新心跳
+					this.service.updateSessionHeartbeat(session);
 				}
 				else if (packetTag.equals(TPT_REQUEST)) {
 					this.processRequest(data.getJSONObject(TALK_PACKET), session);

@@ -29,6 +29,9 @@ package net.cellcloud.talk.dialect;
 import java.util.LinkedList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import net.cellcloud.core.Cellet;
 
 /** 动作方言工厂。
  * 
@@ -40,14 +43,14 @@ public final class ActionDialectFactory extends DialectFactory {
 
 	private ExecutorService executor;
 	private int maxThreadCount;
-	private int threadCount;
+	private AtomicInteger threadCount;
 	private LinkedList<ActionDialect> dialects;
 	private LinkedList<ActionDelegate> delegates;
 
 	public ActionDialectFactory() {
 		this.metaData = new DialectMetaData(ActionDialect.DIALECT_NAME, "Action Dialect");
-		this.maxThreadCount = 16;
-		this.threadCount = 0;
+		this.maxThreadCount = 32;
+		this.threadCount = new AtomicInteger(0);
 		this.dialects = new LinkedList<ActionDialect>();
 		this.delegates = new LinkedList<ActionDelegate>();
 	}
@@ -75,6 +78,26 @@ public final class ActionDialectFactory extends DialectFactory {
 		}
 	}
 
+	@Override
+	protected boolean onTalk(String identifier, Dialect dialect) {
+		return true;
+	}
+
+	@Override
+	protected boolean onDialogue(String identifier, Dialect dialect) {
+		return true;
+	}
+
+	@Override
+	protected boolean onTalk(Cellet cellet, String targetTag, Dialect dialect) {
+		return true;
+	}
+
+	@Override
+	protected boolean onDialogue(Cellet cellet, String sourceTag, Dialect dialect) {
+		return true;
+	}
+
 	/** 执行动作。
 	 */
 	protected void doAction(final ActionDialect dialect, final ActionDelegate delegate) {
@@ -87,13 +110,13 @@ public final class ActionDialectFactory extends DialectFactory {
 			this.delegates.add(delegate);
 		}
 
-		if (this.threadCount < this.maxThreadCount) {
+		if (this.threadCount.get() < this.maxThreadCount) {
 			// 线程数量未达到最大线程数，启动新线程
 
 			this.executor.execute(new Runnable() {
 				@Override
 				public void run() {
-					++threadCount;
+					threadCount.incrementAndGet();
 
 					while (!dialects.isEmpty()) {
 						ActionDelegate adg = null;
@@ -112,7 +135,7 @@ public final class ActionDialectFactory extends DialectFactory {
 						}
 					}
 
-					--threadCount;
+					threadCount.decrementAndGet();
 				}
 			});
 		}

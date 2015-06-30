@@ -31,6 +31,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.text.SimpleDateFormat;
 import java.util.Date;
 
 import net.cellcloud.common.LogHandle;
@@ -45,6 +46,7 @@ public final class FileLogger implements LogHandle {
 
 	private static final FileLogger instance = new FileLogger();
 
+	private String name;
 	private StringBuilder stringBuf = new StringBuilder();
 
 	private FileOutputStream outputStream = null;
@@ -55,6 +57,7 @@ public final class FileLogger implements LogHandle {
 	private int bufSize = 256;
 
 	private FileLogger() {
+		this.name = "CellFileLogger";
 		this.outputStream = null;
 	}
 
@@ -113,6 +116,18 @@ public final class FileLogger implements LogHandle {
 		}
 
 		File file = new File(filename);
+		if (file.exists()) {
+			SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss");
+			Date date = new Date(file.lastModified());
+			try {
+				Utils.copyFile(file, filename + "." + sdf.format(date));
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+
+			// 删除旧文件
+			file.delete();
+		}
 
 		try {
 			this.outputStream = new FileOutputStream(file);
@@ -149,6 +164,11 @@ public final class FileLogger implements LogHandle {
 				// Nothing
 			}
 		}
+	}
+
+	@Override
+	public String getName() {
+		return this.name;
 	}
 
 	@Override

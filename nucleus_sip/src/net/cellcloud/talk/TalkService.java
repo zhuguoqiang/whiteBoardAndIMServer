@@ -2,7 +2,7 @@
 -----------------------------------------------------------------------------
 This source file is part of Cell Cloud.
 
-Copyright (c) 2009-2014 Cell Cloud Team (www.cellcloud.net)
+Copyright (c) 2009-2015 Cell Cloud Team (www.cellcloud.net)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +30,7 @@ import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -83,9 +84,12 @@ public final class TalkService implements Service, SpeakerDelegate {
 	private int block;
 	private int maxConnections;
 
-	private int httpPort;
+	private long sessionTimeout;
+
 	// 服务器端是否启用 HTTP 服务
 	private boolean httpEnabled;
+	private int httpPort;
+	private int httpQueueSize;
 
 	private CookieSessionManager httpSessionManager;
 	private HttpSessionListener httpSessionListener;
@@ -102,9 +106,9 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 	/// 待检验 Session
 	private ConcurrentHashMap<Long, Certificate> unidentifiedSessions;
-	/// Session context
-	private ConcurrentHashMap<Session, TalkSessionContext> sessionContexts;
-	/// Tag 与 Session 上下文的映射
+	/// Session 与 Tag 的映射
+	private ConcurrentHashMap<Long, String> sessionTagMap;
+	/// Tag 与 Session context 的映射
 	private ConcurrentHashMap<String, TalkSessionContext> tagContexts;
 	/// 挂起状态的上下文
 	private ConcurrentHashMap<String, SuspendedTracker> suspendedTrackers;
@@ -114,13 +118,15 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 	// 私有协议 Speaker
 	private ConcurrentHashMap<String, Speaker> speakerMap;
-	protected Vector<Speaker> speakers;
+	protected LinkedList<Speaker> speakers;
 	// HTTP 协议 Speaker
 	private ConcurrentHashMap<String, HttpSpeaker> httpSpeakerMap;
 	protected Vector<HttpSpeaker> httpSpeakers;
 
 	private TalkServiceDaemon daemon;
 	private ArrayList<TalkListener> listeners;
+
+	private CelletCallbackListener callbackListener;
 
 	/** 构造函数。
 	 * @throws SingletonException 
@@ -133,11 +139,15 @@ public final class TalkService implements Service, SpeakerDelegate {
 			this.nucleusContext = nucleusContext;
 
 			this.port = 7000;
-			this.block = 8192;
+			this.block = 16384;
 			this.maxConnections = 1000;
 
-			this.httpPort = 7070;
 			this.httpEnabled = true;
+			this.httpPort = 7070;
+			this.httpQueueSize = 1000;
+
+			// 24 小时
+			this.sessionTimeout = 24 * 60 * 60 * 1000;
 
 			// 5 分钟
 			this.httpSessionTimeout = 5 * 60 * 1000;
@@ -148,6 +158,8 @@ public final class TalkService implements Service, SpeakerDelegate {
 			// 添加默认方言工厂
 			DialectEnumerator.getInstance().addFactory(new ActionDialectFactory());
 			DialectEnumerator.getInstance().addFactory(new ChunkDialectFactory());
+
+			this.callbackListener = DialectEnumerator.getInstance();
 		}
 		else {
 			throw new SingletonException(TalkService.class.getName());
@@ -170,8 +182,8 @@ public final class TalkService implements Service, SpeakerDelegate {
 		if (null == this.unidentifiedSessions) {
 			this.unidentifiedSessions = new ConcurrentHashMap<Long, Certificate>(); 
 		}
-		if (null == this.sessionContexts) {
-			this.sessionContexts = new ConcurrentHashMap<Session, TalkSessionContext>();
+		if (null == this.sessionTagMap) {
+			this.sessionTagMap = new ConcurrentHashMap<Long, String>();
 		}
 		if (null == this.tagContexts) {
 			this.tagContexts = new ConcurrentHashMap<String, TalkSessionContext>();
@@ -232,27 +244,29 @@ public final class TalkService implements Service, SpeakerDelegate {
 			HttpService.getInstance().removeCapsule(this.httpPort);
 		}
 
-		if (null != this.sessionContexts) {
+		if (null != this.tagContexts) {
 			// 关闭所有会话
-			Iterator<Map.Entry<Session, TalkSessionContext>> iter = this.sessionContexts.entrySet().iterator();
+			Iterator<Map.Entry<String, TalkSessionContext>> iter = this.tagContexts.entrySet().iterator();
 			while (iter.hasNext()) {
-				Map.Entry<Session, TalkSessionContext> entry = iter.next();
+				Map.Entry<String, TalkSessionContext> entry = iter.next();
 				TalkSessionContext ctx = entry.getValue();
 				for (Cellet cellet : ctx.getTracker().getCelletList()) {
-					cellet.quitted(ctx.getTracker().getTag());
+					cellet.quitted(ctx.getTag());
 				}
 			}
 
-			this.sessionContexts.clear();
+			this.sessionTagMap.clear();
 			this.tagContexts.clear();
 			this.tagList.clear();
 		}
 
 		if (null != this.speakers) {
-			for (Speaker speaker : this.speakers) {
-				speaker.hangUp();
+			synchronized (this.speakers) {
+				for (Speaker speaker : this.speakers) {
+					speaker.hangUp();
+				}
+				this.speakers.clear();
 			}
-			this.speakers.clear();
 		}
 		if (null != this.httpSpeakers) {
 			for (HttpSpeaker speaker : this.httpSpeakers) {
@@ -287,40 +301,6 @@ public final class TalkService implements Service, SpeakerDelegate {
 		return this.port;
 	}
 
-	/** 设置 HTTP 服务端口。
-	 * @note 在 startup 之前设置才能生效。
-	 */
-	public void setHttpPort(int port) {
-		if (null != this.acceptor && this.acceptor.isRunning()) {
-			throw new InvalidException("Can't set the http port in talk service after the start");
-		}
-
-		this.httpPort = port;
-	}
-
-	/** 返回 HTTP 服务端口。
-	 * @return
-	 */
-	public int getHttpPort() {
-		return this.httpPort;
-	}
-
-	/** 设置是否激活 HTTP 服务。
-	 */
-	public void httpEnabled(boolean enabled) {
-		if (null != HttpService.getInstance() && HttpService.getInstance().hasCapsule(this.httpPort)) {
-			throw new InvalidException("Can't set the http enabled in talk service after the start");
-		}
-
-		this.httpEnabled = enabled;
-	}
-
-	/** 设置 HTTP 会话超时时间。
-	 */
-	public void settHttpSessionTimeout(long timeoutInMillisecond) {
-		this.httpSessionTimeout = timeoutInMillisecond;
-	}
-
 	/**
 	 * 设置适配器缓存块大小。
 	 * @param size
@@ -339,6 +319,47 @@ public final class TalkService implements Service, SpeakerDelegate {
 		}
 
 		this.maxConnections = num;
+	}
+
+	/** 设置是否激活 HTTP 服务。
+	 */
+	public void httpEnabled(boolean enabled) {
+		if (null != HttpService.getInstance() && HttpService.getInstance().hasCapsule(this.httpPort)) {
+			throw new InvalidException("Can't set the http enabled in talk service after the start");
+		}
+
+		this.httpEnabled = enabled;
+	}
+
+	/** 设置 HTTP 服务端口。
+	 * @note 在 startup 之前设置才能生效。
+	 */
+	public void setHttpPort(int port) {
+		if (null != this.acceptor && this.acceptor.isRunning()) {
+			throw new InvalidException("Can't set the http port in talk service after the start");
+		}
+
+		this.httpPort = port;
+	}
+
+	/** 返回 HTTP 服务端口。
+	 * @return
+	 */
+	public int getHttpPort() {
+		return this.httpPort;
+	}
+
+	/** 设置 HTTP 服务的允许接收连接的队列长度。
+	 * @param value
+	 */
+	public void setHttpQueueSize(int value) {
+		this.httpQueueSize = value;
+	}
+
+	/** 设置 HTTP 会话超时时间。
+	 */
+	public void settHttpSessionTimeout(long timeoutInMillisecond) {
+		this.httpSessionTimeout = timeoutInMillisecond;
 	}
 
 	/** 启动任务表守护线程。
@@ -433,7 +454,7 @@ public final class TalkService implements Service, SpeakerDelegate {
 		TalkSessionContext context = this.tagContexts.get(targetTag);
 		if (null == context) {
 			if (Logger.isDebugLevel()) {
-				Logger.d(TalkService.class, "Can't find target tag in context list : " + targetTag);
+				Logger.w(TalkService.class, "Can't find target tag in context list : " + targetTag);
 			}
 
 			// 尝试在已挂起的的追踪器里查找
@@ -453,27 +474,26 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 		synchronized (context) {
 			if (context.getTracker().hasCellet(cellet)) {
-				Session session = context.getSession();
-				message = this.packetDialogue(cellet, primitive, (session instanceof WebSocketSession));
-				if (null != message) {
-					session.write(message);
+				// 对方言进行是否劫持处理
+				if (null != this.callbackListener && primitive.isDialectal()) {
+					boolean ret = this.callbackListener.doTalk(cellet, targetTag, primitive.getDialect());
+					if (!ret) {
+						// 劫持会话
+						return true;
+					}
+				}
+
+				Session session = context.getLastSession();
+				if (null != session) {
+					message = this.packetDialogue(cellet, primitive, (session instanceof WebSocketSession));
+					if (null != message) {
+						session.write(message);
+					}
+				}
+				else {
+					Logger.w(this.getClass(), "Can NOT find valid session in context - tag: " + targetTag);
 				}
 			}
-//			for (TalkSessionContext ctx : contexts) {
-//				// 查找上文里指定的会话追踪器
-//				TalkTracker tracker = ctx.getTracker(targetTag);
-//				if (null != tracker) {
-//					// 判断是否是同一个 Cellet
-//					if (tracker.activeCellet == cellet) {
-//						Session session = ctx.getSession();
-//						message = this.packetDialogue(primitive);
-//						if (null != message) {
-//							session.write(message);
-//						}
-//						break;
-//					}
-//				}
-//			}
 		}
 
 		return (null != message);
@@ -534,7 +554,7 @@ public final class TalkService implements Service, SpeakerDelegate {
 			// 私有协议 Speaker
 
 			if (null == this.speakers) {
-				this.speakers = new Vector<Speaker>();
+				this.speakers = new LinkedList<Speaker>();
 				this.speakerMap = new ConcurrentHashMap<String, Speaker>();
 			}
 
@@ -547,7 +567,9 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 			// 创建新的 Speaker
 			Speaker speaker = new Speaker(address, this, this.block, capacity);
-			this.speakers.add(speaker);
+			synchronized (this.speakers) {
+				this.speakers.add(speaker);
+			}
 
 			// FIXME 28/11/14 原先在 call 检查 Speaker 是否是 Lost 状态，如果 lost 是 true，则置为 false
 			// 复位 Speaker 参数
@@ -621,27 +643,39 @@ public final class TalkService implements Service, SpeakerDelegate {
 	 * 
 	 * @note Client
 	 */
-	public void hangUp(String identifier) {
-		if (null != this.speakerMap && this.speakerMap.containsKey(identifier)) {
-			Speaker speaker = this.speakerMap.get(identifier);
-			speaker.hangUp();
+	public void hangUp(List<String> identifiers) {
+		if (null != this.speakerMap) {
+			for (String identifier : identifiers) {
+				if (this.speakerMap.containsKey(identifier)) {
+					Speaker speaker = this.speakerMap.remove(identifier);
 
-			for (String celletIdentifier : speaker.getIdentifiers()) {
-				this.speakerMap.remove(celletIdentifier);
+					for (String celletIdentifier : speaker.getIdentifiers()) {
+						this.speakerMap.remove(celletIdentifier);
+					}
+
+					synchronized (this.speakers) {
+						this.speakers.remove(speaker);
+					}
+
+					speaker.hangUp();
+				}
 			}
-
-			this.speakers.remove(speaker);
 		}
 
-		if (null != this.httpSpeakerMap && this.httpSpeakerMap.containsKey(identifier)) {
-			HttpSpeaker speaker = this.httpSpeakerMap.get(identifier);
-			speaker.hangUp();
+		if (null != this.httpSpeakerMap) {
+			for (String identifier : identifiers) {
+				if (this.httpSpeakerMap.containsKey(identifier)) {
+					HttpSpeaker speaker = this.httpSpeakerMap.remove(identifier);
 
-			for (String celletIdentifier : speaker.getIdentifiers()) {
-				this.httpSpeakerMap.remove(celletIdentifier);
+					for (String celletIdentifier : speaker.getIdentifiers()) {
+						this.httpSpeakerMap.remove(celletIdentifier);
+					}
+
+					this.httpSpeakers.remove(speaker);
+
+					speaker.hangUp();
+				}
 			}
-
-			this.httpSpeakers.remove(speaker);
 		}
 	}
 
@@ -706,6 +740,7 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 		return false;
 	}
+
 	/** Cellet 服务是否已经被挂起。
 	 * 
 	 * @note Client
@@ -722,6 +757,10 @@ public final class TalkService implements Service, SpeakerDelegate {
 		return false;
 	}
 
+	public ExecutorService getExecutor() {
+		return this.executor;
+	}
+
 	/** 启动 HTTP 服务。
 	 */
 	private void startHttpService() {
@@ -730,7 +769,8 @@ public final class TalkService implements Service, SpeakerDelegate {
 			return;
 		}
 
-		this.webSocketManager = HttpService.getInstance().activeWebSocket(this.httpPort + 1, new WebSocketMessageHandler(this));
+		this.webSocketManager = HttpService.getInstance().activeWebSocket(this.httpPort + 1
+				, this.httpQueueSize, new WebSocketMessageHandler(this));
 
 		// 创建 Session 管理器
 		this.httpSessionManager = new CookieSessionManager();
@@ -740,7 +780,7 @@ public final class TalkService implements Service, SpeakerDelegate {
 		this.httpSessionManager.addSessionListener(this.httpSessionListener);
 
 		// 创建服务节点
-		HttpCapsule capsule = new HttpCapsule(this.httpPort, this.maxConnections);
+		HttpCapsule capsule = new HttpCapsule(this.httpPort, this.httpQueueSize);
 		// 设置 Session 管理器
 		capsule.setSessionManager(this.httpSessionManager);
 		// 依次添加 Holder 点
@@ -863,7 +903,7 @@ public final class TalkService implements Service, SpeakerDelegate {
 	public Endpoint findEndpoint(String remoteTag) {
 		TalkSessionContext ctx = this.tagContexts.get(remoteTag);
 		if (null != ctx) {
-			return ctx.getTracker().getEndpoint();
+			return ctx.getEndpoint();
 		}
 
 		return null;
@@ -889,108 +929,61 @@ public final class TalkService implements Service, SpeakerDelegate {
 	/** 关闭 Session 。
 	 */
 	protected synchronized void closeSession(final Session session) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
-		if (null != ctx) {
-			TalkTracker tracker = ctx.getTracker();
-			String tag = tracker.getTag();
-
-			// 判断是否需要进行挂起
-			if (tracker.isAutoSuspend()) {
-				// 将消费者挂起，被动挂起
-				this.suspendTalk(tracker, SuspendMode.PASSIVE);
-				for (Cellet cellet : tracker.getCelletList()) {
-					// 通知 Cellet 对端挂起
-					cellet.suspended(tag);
-				}
-			}
-			else if (this.suspendedTrackers.containsKey(tag)) {
-				// 已经挂起的对端，判断是否有指定 Cellet 上的挂起记录
-				for (Cellet cellet : tracker.getCelletList()) {
-					SuspendedTracker st = this.suspendedTrackers.get(tag);
-					if (!st.exist(cellet)) {
-						// 没有记录，对端退出
-						cellet.quitted(tag);
-					}
-					else {
-						// 有记录，对端挂起
-						// FIXME 01/01/2013 如果已经挂起说明之前已经是主动挂起了，
-						// 不需要再回调事件。
-						//tracker.activeCellet.suspended(tag);
-					}
-				}
-			}
-			else {
-				// 不进行挂起
-				for (Cellet cellet : tracker.getCelletList()) {
-					cellet.quitted(tag);
-				}
-			}
-
-			/*
-			// 遍历此 Session 所访问的所有 Cellet
-			Map<String, TalkTracker> map = ctx.getTrackers();
-			Iterator<Map.Entry<String, TalkTracker>> iter = map.entrySet().iterator();
-			while (iter.hasNext()) {
-				Map.Entry<String, TalkTracker> entry = iter.next();
-				String tag = entry.getKey();
-				TalkTracker tracker = entry.getValue();
+		String tag = this.sessionTagMap.get(session.getId());
+		if (null != tag) {
+			TalkSessionContext ctx = this.tagContexts.get(tag);
+			if (null != ctx) {
+				TalkTracker tracker = ctx.getTracker();
 
 				// 判断是否需要进行挂起
 				if (tracker.isAutoSuspend()) {
 					// 将消费者挂起，被动挂起
-					this.suspendTalk(tracker, SuspendMode.PASSIVE);
-					if (null != tracker.activeCellet) {
+					this.suspendTalk(ctx, SuspendMode.PASSIVE);
+					for (Cellet cellet : tracker.getCelletList()) {
 						// 通知 Cellet 对端挂起
-						tracker.activeCellet.suspended(tag);
+						cellet.suspended(tag);
 					}
 				}
 				else if (this.suspendedTrackers.containsKey(tag)) {
 					// 已经挂起的对端，判断是否有指定 Cellet 上的挂起记录
-					if (null != tracker.activeCellet) {
+					for (Cellet cellet : tracker.getCelletList()) {
 						SuspendedTracker st = this.suspendedTrackers.get(tag);
-						if (!st.exist(tracker.activeCellet)) {
+						if (!st.exist(cellet)) {
 							// 没有记录，对端退出
-							tracker.activeCellet.quitted(tag);
+							cellet.quitted(tag);
 						}
 						else {
 							// 有记录，对端挂起
 							// FIXME 01/01/2013 如果已经挂起说明之前已经是主动挂起了，
 							// 不需要再回调事件。
-							//tracker.activeCellet.suspended(tag);
 						}
 					}
 				}
 				else {
-					// 不进行挂起
-					if (null != tracker.activeCellet) {
-						// 通知 Cellet 对端退出
-						tracker.activeCellet.quitted(tag);
-					}
-				}
+					// 不进行挂起，进行删除
 
-				// 处理标签和上下文映射列表
-				Vector<TalkSessionContext> list = this.tagSessionsMap.get(tag);
-				if (list != null) {
-					for (int i = 0, size = list.size(); i < size; ++i) {
-						TalkSessionContext c = list.get(i);
-						if (c.getSession().getId() == session.getId()) {
-							list.remove(i);
-							break;
+					ctx.removeSession(session);
+
+					if (ctx.numSessions() == 0) {
+						for (Cellet cellet : tracker.getCelletList()) {
+							cellet.quitted(tag);
 						}
-					}
 
-					// 如果清单为空，则删除此记录
-					if (list.isEmpty()) {
-						this.tagSessionsMap.remove(tag);
+						Logger.i(this.getClass(), "Clear session: " + tag);
+
+						// 清理上下文记录
+						this.tagContexts.remove(tag);
 						this.tagList.remove(tag);
 					}
 				}
-			} // # while
-			*/
+			}
 
-			// 清理上下文记录
-			this.tagContexts.remove(tag);
-			this.sessionContexts.remove(session);
+			// 删除此条会话记录
+			this.sessionTagMap.remove(session.getId());
+		}
+		else {
+			//
+			Logger.i(this.getClass(), "Can NOT find tag with session: " + session.getAddress().getHostString());
 		}
 
 		// 清理未授权表
@@ -1003,9 +996,26 @@ public final class TalkService implements Service, SpeakerDelegate {
 		Long sid = session.getId();
 		this.unidentifiedSessions.remove(sid);
 
-		TalkSessionContext ctx = new TalkSessionContext(session, tag, session.getAddress());
-		ctx.tickTime = this.getTickTime();
-		this.sessionContexts.put(session, ctx);
+		// Session -> Tag
+		this.sessionTagMap.put(session.getId(), tag);
+
+		// Tag -> Context
+		TalkSessionContext ctx = this.tagContexts.get(tag);
+		if (null != ctx) {
+			// 该 Tag 已存在则增加 session
+			ctx.addSession(session);
+		}
+		else {
+			// 创建新的上下文
+			ctx = new TalkSessionContext(tag, session);
+			ctx.dialogueTickTime = this.getTickTime();
+			this.tagContexts.put(tag, ctx);
+		}
+
+		// 缓存 Tag
+		if (!this.tagList.contains(tag)) {
+			this.tagList.add(tag);
+		}
 	}
 
 	/** 拒绝指定 Session 连接。
@@ -1024,7 +1034,15 @@ public final class TalkService implements Service, SpeakerDelegate {
 		log = null;
 
 		this.unidentifiedSessions.remove(sid);
-		this.sessionContexts.remove(session);
+
+		// 删除 Tag context
+		String tag = this.sessionTagMap.remove(sid);
+		if (null != tag) {
+			TalkSessionContext ctx = this.tagContexts.get(tag);
+			if (null != ctx) {
+				ctx.removeSession(session);
+			}
+		}
 
 		if (!(session instanceof HttpSession)
 			&& !(session instanceof WebSocketSession)) {
@@ -1038,41 +1056,12 @@ public final class TalkService implements Service, SpeakerDelegate {
 	/** 请求 Cellet 。
 	 */
 	protected TalkTracker processRequest(Session session, String tag, String identifier) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
+		TalkSessionContext ctx = this.tagContexts.get(tag);
 		if (null == ctx) {
 			return null;
 		}
 
-		// 标签与上下文映射
-		if (!this.tagContexts.containsKey(tag)) {
-			this.tagContexts.put(tag, ctx);
-		}
-
-		// 缓存 Tag
-		if (!this.tagList.contains(tag)) {
-			this.tagList.add(tag);
-		}
-
-		Cellet cellet = Nucleus.getInstance().getCellet(identifier, this.nucleusContext);
-
-//		if (null != tracker) {
-//			if (tracker.activeCellet != null && tracker.activeCellet.getFeature().getIdentifier().equals(identifier)) {
-//				cellet = null;
-//			}
-//			else {
-//				cellet = Nucleus.getInstance().getCellet(identifier, this.nucleusContext);
-//				if (null != cellet) {
-//					tracker.activeCellet = cellet;
-//				}
-//			}
-//		}
-//		else {
-//			tracker = ctx.addTracker(tag, session.getAddress());
-//			cellet = Nucleus.getInstance().getCellet(identifier, this.nucleusContext);
-//			if (null != cellet) {
-//				tracker.activeCellet = cellet;
-//			}
-//		}
+		final Cellet cellet = Nucleus.getInstance().getCellet(identifier, this.nucleusContext);
 
 		TalkTracker tracker = null;
 
@@ -1099,20 +1088,12 @@ public final class TalkService implements Service, SpeakerDelegate {
 	/** 协商服务能力。
 	 */
 	protected TalkCapacity processConsult(Session session, String tag, TalkCapacity capacity) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
+		TalkSessionContext ctx = this.tagContexts.get(tag);
 		if (null == ctx) {
 			return new TalkCapacity(false, 0);
 		}
 
-		// 标签与上下文映射
-		if (!this.tagContexts.containsKey(tag)) {
-			this.tagContexts.put(tag, ctx);
-		}
-
 		TalkTracker tracker = ctx.getTracker();
-//		if (null == tracker) {
-//			return new TalkCapacity(false, 0);
-//		}
 
 		// 设置是否重连
 		tracker.setAutoSuspend(capacity.autoSuspend);
@@ -1125,39 +1106,41 @@ public final class TalkService implements Service, SpeakerDelegate {
 	/** 对话 Cellet 。
 	 */
 	protected void processDialogue(Session session, String speakerTag, String targetIdentifier, Primitive primitive) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
+		TalkSessionContext ctx = this.tagContexts.get(speakerTag);
 		if (null != ctx) {
-			ctx.tickTime = this.getTickTime();
+			ctx.dialogueTickTime = this.getTickTime();
 
 			TalkTracker tracker = ctx.getTracker();
 			Cellet cellet = tracker.getCellet(targetIdentifier);
 			if (null != cellet) {
 				primitive.setCelletIdentifier(cellet.getFeature().getIdentifier());
 				primitive.setCellet(cellet);
+
+				if (null != this.callbackListener && primitive.isDialectal()) {
+					boolean ret = this.callbackListener.doDialogue(cellet, speakerTag, primitive.getDialect());
+					if (!ret) {
+						// 被劫持，直接返回
+						return;
+					}
+				}
+
+				// 回调 Cellet
 				cellet.dialogue(speakerTag, primitive);
 			}
-
-//			if (null != tracker && null != tracker.activeCellet) {
-//				// 设置原语的 Cellet 标识
-//				primitive.setCelletIdentifier(tracker.activeCellet.getFeature().getIdentifier());
-//				primitive.setCellet(tracker.activeCellet);
-//				// 回调
-//				tracker.activeCellet.dialogue(speakerTag, primitive);
-//			}
 		}
 	}
 
 	/** 挂起指定的会话。
 	 */
 	protected boolean processSuspend(Session session, String speakerTag, long duration) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
+		TalkSessionContext ctx = this.tagContexts.get(speakerTag);
 		if (null == ctx) {
 			return false;
 		}
 
 		TalkTracker talkTracker = ctx.getTracker();
 		// 进行主动挂起
-		SuspendedTracker st = this.suspendTalk(talkTracker, SuspendMode.INITATIVE);
+		SuspendedTracker st = this.suspendTalk(ctx, SuspendMode.INITATIVE);
 		if (null != st) {
 			// 更新有效时长
 			st.liveDuration = duration;
@@ -1176,7 +1159,7 @@ public final class TalkService implements Service, SpeakerDelegate {
 	/** 恢复指定的会话。
 	 */
 	protected void processResume(Session session, String speakerTag, long startTime) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
+		TalkSessionContext ctx = this.tagContexts.get(session);
 		if (null == ctx) {
 			return;
 		}
@@ -1214,7 +1197,11 @@ public final class TalkService implements Service, SpeakerDelegate {
 			TalkTracker tracker = context.getTracker();
 			// 判断是否是同一个 Cellet
 			if (tracker.getCellet(cellet.getFeature().getIdentifier()) == cellet) {
-				Session session = context.getSession();
+				Session session = context.getLastSession();
+				if (null == session) {
+					Logger.w(this.getClass(), "Can NOT find valid session in context - tag: " + targetTag);
+					return;
+				}
 
 				// 发送所有原语
 				for (int i = 0, size = timestampQueue.size(); i < size; ++i) {
@@ -1256,8 +1243,8 @@ public final class TalkService implements Service, SpeakerDelegate {
 				deliverChecking(cert.session, cert.plaintext, cert.key);
 			}
 			else {
-				// 10 秒超时检测
-				if (time - cert.time > 10000) {
+				// 20 秒超时检测
+				if (time - cert.time > 20000) {
 					if (null == sessionList) {
 						sessionList = new ArrayList<Session>();
 					}
@@ -1305,10 +1292,15 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 	/** 更新 Session tick time 。
 	 */
-	protected void updateSessionTickTime(Session session) {
-		TalkSessionContext ctx = this.sessionContexts.get(session);
+	protected void updateSessionHeartbeat(Session session) {
+		String tag = this.sessionTagMap.get(session.getId());
+		if (null == tag) {
+			return;
+		}
+
+		TalkSessionContext ctx = this.tagContexts.get(tag);
 		if (null != ctx) {
-			ctx.tickTime = this.daemon.getTickTime();
+			ctx.updateSessionHeartbeat(session, this.getTickTime());
 
 			if (Logger.isDebugLevel()) {
 				Logger.d(this.getClass(), "Talk service heartbeat from " + session.getAddress().getAddress().getHostAddress()
@@ -1321,6 +1313,43 @@ public final class TalkService implements Service, SpeakerDelegate {
 	 */
 	protected long getTickTime() {
 		return this.daemon.getTickTime();
+	}
+
+	/**
+	 * 检查会话是否超时。
+	 * @param timeout
+	 */
+	protected void checkSessionHeartbeat() {
+		if (null == this.tagContexts) {
+			return;
+		}
+
+		LinkedList<Session> closeList = new LinkedList<Session>();
+
+		for (Map.Entry<String, TalkSessionContext> entry : this.tagContexts.entrySet()) {
+			TalkSessionContext ctx = entry.getValue();
+
+			List<Session> sl = ctx.getSessions();
+			for (Session s : sl) {
+				long time = ctx.getSessionHeartbeat(s);
+				if (time == 0) {
+					continue;
+				}
+
+				if (this.daemon.getTickTime() - time > this.sessionTimeout) {
+					// 超时的 Session 添加到关闭列表
+					closeList.add(s);
+					Logger.d(this.getClass(), "Session timeout in heartbeat: " + s.getAddress().getHostString());
+				}
+			}
+		}
+
+		for (Session session : closeList) {
+			this.closeSession(session);
+		}
+
+		closeList.clear();
+		closeList = null;
 	}
 
 	/** 检查 HTTP Session 心跳。
@@ -1347,6 +1376,10 @@ public final class TalkService implements Service, SpeakerDelegate {
 	/** 检查并删除挂起的会话。
 	 */
 	protected void checkAndDeleteSuspendedTalk() {
+		if (null == this.suspendedTrackers) {
+			return;
+		}
+
 		// 两个判断依据，满足任一一个时即可进行删除：
 		// 1、挂起会话超时
 		// 2、挂起会话所标识的消费端已经和 Cellet 重建连接
@@ -1374,21 +1407,21 @@ public final class TalkService implements Service, SpeakerDelegate {
 
 	/** 挂起会话。
 	 */
-	private SuspendedTracker suspendTalk(TalkTracker talkTracker, int suspendMode) {
-		if (this.suspendedTrackers.containsKey(talkTracker.getTag())) {
-			SuspendedTracker tracker = this.suspendedTrackers.get(talkTracker.getTag());
-			for (Cellet cellet : talkTracker.getCelletList()) {
+	private SuspendedTracker suspendTalk(TalkSessionContext ctx, int suspendMode) {
+		if (this.suspendedTrackers.containsKey(ctx.getTag())) {
+			SuspendedTracker tracker = this.suspendedTrackers.get(ctx.getTag());
+			for (Cellet cellet : ctx.getTracker().getCelletList()) {
 				tracker.track(cellet, suspendMode);
 			}
 			return tracker;
 		}
 
-		SuspendedTracker tracker = new SuspendedTracker(talkTracker.getTag());
-		for (Cellet cellet : talkTracker.getCelletList()) {
+		SuspendedTracker tracker = new SuspendedTracker(ctx.getTag());
+		for (Cellet cellet : ctx.getTracker().getCelletList()) {
 			tracker.track(cellet, suspendMode);
 		}
-		tracker.liveDuration = talkTracker.getSuspendDuration();
-		this.suspendedTrackers.put(talkTracker.getTag(), tracker);
+		tracker.liveDuration = ctx.getTracker().getSuspendDuration();
+		this.suspendedTrackers.put(ctx.getTag(), tracker);
 		return tracker;
 	}
 
